@@ -1,7 +1,7 @@
 name: Build & Deploy
 
 # This is a REUSABLE workflow — it does nothing on its own.
-# Each app repo calls it from a tiny workflow.
+# Each app repo calls it from a tiny workflow from app repo added with docker yml.
 on:
   workflow_call:
     inputs:
