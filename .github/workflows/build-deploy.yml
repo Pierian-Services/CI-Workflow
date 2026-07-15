@@ -13,6 +13,18 @@ on:
         description: Path to the backend Dockerfile
         type: string
         default: Dockerfile.backend
+      k8s_app:
+        description: >-
+          k8s deployment prefix for this app in the `pierian` namespace.
+          Deployments must be named <k8s_app>-backend and <k8s_app>-frontend
+          with containers named `backend` / `frontend`.
+          (e.g. any2any, vapt, xl-merger, pdf-splitter, xl-splitter)
+        type: string
+        required: true
+      k8s_namespace:
+        description: Kubernetes namespace the app is deployed in
+        type: string
+        default: pierian
 
 env:
   REGISTRY: ghcr.io
@@ -51,6 +63,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push frontend
+        id: build-frontend
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -80,6 +93,7 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push backend
+        id: build-backend
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -90,8 +104,29 @@ jobs:
           cache-from: type=gha,scope=backend
           cache-to: type=gha,mode=max,scope=backend
 
-      # Deploy
-      - name: Deploy containers
+      # Deploy — roll the k8s Deployments to the exact images just built.
+      # Runs on the self-hosted azure-vm runner (user digital-pro), which has
+      # cluster-admin kubectl access to the local node — no kubeconfig secret
+      # needed. Images are pinned by DIGEST (immutable, exact); the k8s node
+      # pulls them from GHCR using the in-cluster `ghcr-pull` secret.
+      - name: Deploy to Kubernetes
+        env:
+          KUBECONFIG: /home/digital-pro/.kube/config
+          NS: ${{ inputs.k8s_namespace }}
+          APP: ${{ inputs.k8s_app }}
+          FE_DIGEST: ${{ steps.build-frontend.outputs.digest }}
+          BE_DIGEST: ${{ steps.build-backend.outputs.digest }}
         run: |
-          docker compose pull
-          docker compose up -d --remove-orphans
+          set -euo pipefail
+          # GHCR paths must be lowercase; github.repository can contain capitals.
+          IMAGE_BASE=$(echo "${{ env.REGISTRY }}/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "Deploying '$APP' in namespace '$NS'"
+          echo "  backend  = ${IMAGE_BASE}-backend@${BE_DIGEST}"
+          echo "  frontend = ${IMAGE_BASE}-frontend@${FE_DIGEST}"
+
+          kubectl -n "$NS" set image deployment/"${APP}-backend"  backend="${IMAGE_BASE}-backend@${BE_DIGEST}"
+          kubectl -n "$NS" set image deployment/"${APP}-frontend" frontend="${IMAGE_BASE}-frontend@${FE_DIGEST}"
+
+          # Wait for both rollouts; fail the job if either stalls.
+          kubectl -n "$NS" rollout status deployment/"${APP}-backend"  --timeout=300s
+          kubectl -n "$NS" rollout status deployment/"${APP}-frontend" --timeout=300s
