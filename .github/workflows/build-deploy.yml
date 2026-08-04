@@ -30,8 +30,35 @@ env:
   REGISTRY: ghcr.io
 
 jobs:
+  # Secret scan gate — runs before anything is built or deployed.
+  # Free substitute for GitHub Advanced Security push protection: uses the
+  # gitleaks binary directly (the gitleaks-action requires a paid org license).
+  # If a secret is found the job fails and build-deploy never runs.
+  # To allowlist a known false positive, add a .gitleaksignore file (list the
+  # reported fingerprints) or a .gitleaks.toml config in the app repo.
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: [self-hosted, azure-vm]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history so gitleaks can scan every commit
+
+      - name: Install & run gitleaks
+        env:
+          GITLEAKS_VERSION: "8.18.4"
+        run: |
+          set -euo pipefail
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz gitleaks
+          ./gitleaks version
+          # --redact keeps secret values out of the logs; --exit-code 1 fails the job on any finding.
+          ./gitleaks detect --source . --redact --verbose --exit-code 1
+
   build-deploy:
     name: Build & push images, deploy on VM
+    needs: secret-scan
     runs-on: [self-hosted, azure-vm]
     permissions:
       contents: read
